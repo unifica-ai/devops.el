@@ -1,0 +1,240 @@
+;; devops.el
+
+
+(require 'magit)
+
+(defun devops-org-keyword (key)
+  (cadr (assoc key (org-collect-keywords (list key)))))
+
+(defun devops-tangle-resolve-target ()
+  "Return (FILEPATH . BODY) for the source block at point."
+  (let* ((element (org-element-at-point))
+         (body (org-element-property :value element))
+         (header (org-element-property :parameters element))
+         (target (when (and header (string-match "target=\"\\([^\"]+\\)\"" header))
+                   (match-string 1 header)))
+         (info (org-babel-get-src-block-info 'light))
+         (params (nth 2 info))
+         (dir (cdr (assq :dir params))))
+    (unless target
+      (user-error "No target variable found in source block header"))
+    (unless dir
+      (user-error "No :dir property found"))
+    (cons (concat dir target) body)))
+
+(defun devops-tangle-to-target ()
+  "Tangle source block at point to :dir + target path."
+  (interactive)
+  (pcase-let ((`(,filepath . ,body) (my/tangle-resolve-target)))
+    (write-region body nil filepath)
+    (message "Wrote %s" filepath)))
+
+(defun devops-resolve-auth-table (rows)
+  "Resolve auth-source passwords for ROWS against AUTH-HOST.
+Each row is (KEY AUTH-USER). Returns ((KEY PASSWORD) ...).
+Binds `default-directory' locally so auth-source (1password)
+always runs `op' on the local server, not over TRAMP."
+  (let ((default-directory "~"))
+    (mapcar (lambda (row)
+              (list (car row)
+                    (auth-source-pick-first-password
+                     :host (nth 1 row) :user (nth 2 row))))
+            rows)))
+
+(defun devops-create-podman-secrets (secrets)
+  "Create Podman secrets.
+SECRETS is a list of (secret-name auth-user) rows."
+  (dolist (pair (devops-resolve-auth-table secrets))
+    (let* ((secret-name (car pair))
+           (password (nth 1 pair))
+           (cmd (format "printf '%%s' %s | podman secret create --replace %s -"
+                        (shell-quote-argument password)
+                        (shell-quote-argument secret-name))))
+      (message "Creating secret %s ..." secret-name)
+      (shell-command cmd)
+      (message "Creating secret %s ... done" secret-name))))
+
+(defun devops-exec-in-notebook (block-name)
+  "Execute BLOCK-NAME in the source deployment org file."
+  (with-current-buffer (find-file-noselect devops-notebook)
+    (org-babel-goto-named-src-block block-name)
+    (org-babel-execute-src-block)))
+
+(defun devops-org-tool-blocks (&optional regexp)
+  "Return a summary of org-babel library of babel entries.
+Filter by REGEXP if provided."
+  (mapcar (lambda (entry)
+            (let* ((name (car entry))
+                   (info (cdr entry))
+                   (lang (nth 0 info))
+                   (body (string-trim (nth 1 info)))
+                   (params (nth 2 info))
+                   (filtered (seq-filter (lambda (p)
+                                           (memq (car p) '(:dir :session :var)))
+                                         params))
+                   (filtered (seq-remove (lambda (p)
+                                           (and (eq (car p) :session)
+                                                (equal (cdr p) "none")))
+                                         filtered)))
+              (list name lang body filtered)))
+          (seq-filter (lambda (entry)
+                        (or (null regexp)
+                            (string-match-p regexp (symbol-name (car entry)))))
+                      org-babel-library-of-babel)))
+
+(defun devops-open-ghostty-at-dir (dir &optional env-vars body)
+  "Open Ghostty terminal at current directory.
+If directory is remote (TRAMP), SSH into that server.
+ENV-VARS is an alist of (NAME . VALUE) to export.
+BODY is the source block content to copy to clipboard."
+  (when body
+    (kill-new body)
+    (message "Source block copied to kill ring."))
+  (if (file-remote-p dir)
+      (let* ((shell "$SHELL")
+             (tramp-vec (tramp-dissect-file-name dir))
+             (user (tramp-file-name-user tramp-vec))
+             (host (tramp-file-name-host tramp-vec))
+             (remote-dir (tramp-file-name-localname tramp-vec))
+             (ssh-target (if user (concat user "@" host) host))
+             (env-exports (if env-vars
+                              (mapconcat
+                               (lambda (pair)
+                                 (format "export %s=%s"
+                                         (car pair)
+                                         (shell-quote-argument
+                                          (format "%s" (cdr pair)))))
+                               env-vars
+                               " && ")
+                            nil))
+             (remote-cmd (string-join
+                          (delq nil
+                                (list
+                                 (concat "cd " (shell-quote-argument remote-dir))
+                                 env-exports
+                                 shell))
+                          " && ")))
+        (call-process "ghostty" nil 0 nil
+                      "-e" "ssh" "-t" ssh-target remote-cmd))
+    (let ((env-exports (when env-vars
+                         (mapconcat
+                          (lambda (pair)
+                            (format "export %s=%s"
+                                    (car pair)
+                                    (shell-quote-argument
+                                     (format "%s" (cdr pair)))))
+                          env-vars
+                          " && "))))
+      (if env-exports
+          (call-process "ghostty" nil 0 nil
+                        (concat "--working-directory=" dir)
+                        "-e" "bash" "-c"
+                        (concat env-exports " && exec $SHELL"))
+        (call-process "ghostty" nil 0 nil
+                      (concat "--working-directory=" dir))))))
+
+(defun devops-context-directory ()
+  "Return contextual directory: src block :dir, dired dir, or default."
+  (cond
+   ((derived-mode-p 'dired-mode)
+    (dired-current-directory))
+   ((derived-mode-p 'org-mode)
+    (when-let ((info (org-babel-get-src-block-info 'light)))
+      (let ((dir (cdr (assq :dir (nth 2 info)))))
+        (when dir (expand-file-name dir)))))
+   (buffer-file-name
+    (file-name-directory buffer-file-name))))
+
+(defun devops-src-block-env-vars ()
+  "Return alist of evaluated :var params from current src block."
+  (when (derived-mode-p 'org-mode)
+    (when-let ((info (org-babel-get-src-block-info)))
+      (let ((params (nth 2 info)))
+        (delq nil
+              (mapcar (lambda (p)
+                        (when (eq (car p) :var)
+                          (let* ((spec (cdr p))
+                                 (name (if (consp spec) (car spec)
+                                         (car (split-string (format "%s" spec) "="))))
+                                 (value (if (consp spec) (cdr spec)
+                                          (org-babel-ref-resolve
+                                           (cadr (split-string (format "%s" spec) "="))))))
+                            (cons (format "%s" name) value))))
+                      params))))))
+
+(defun devops-src-block-body ()
+  "Return the body of the current src block, or nil."
+  (when (derived-mode-p 'org-mode)
+    (when-let ((info (org-babel-get-src-block-info 'light)))
+      (let ((body (org-trim (nth 1 info))))
+        (unless (string-empty-p body) body)))))
+
+(defun devops-open-ghostty-dwim ()
+  "Open Ghostty at contextual directory.
+In a src block: copies body to clipboard and exports :var env vars."
+  (interactive)
+  (let ((dir (or (devops-context-directory) default-directory))
+        (env-vars (devops-src-block-env-vars))
+        (body (devops-src-block-body)))
+    (devops-open-ghostty-at-dir dir env-vars body)))
+
+(defun devops--new-timestamp ()
+  "Creates a new timestamp by formatting the current time."
+  (format-time-string "%Y%m%dT%H%M%S"))
+
+(cl-defun devops--create-notebook-dir (slug &key (type "migration") (timestamp (devops--new-timestamp)))
+  "Create a notebook directory in the subdirectory indice"
+  (let* ((dir-name (format "%s--%s" timestamp slug))
+	 (root (project-root (project-current)))
+	 (dir (expand-file-name (pluralize-string type) root))
+	 (notebook-dir (expand-file-name dir-name dir)))
+    (make-directory notebook-dir t)))
+
+(defun devops-create-migration-dir (slug)
+  "Creates a new timestamped migrations directory"
+  (interactive "sSlug: ")
+  (devops--create-notebook-dir slug :type "migrations"))
+
+(defun devops-create-incident-dir (slug)
+  "Creates a new timestamped incident directory"
+  (interactive "sSlug: ")
+  (devops--create-notebook-dir slug :type "incidents"))
+
+(cl-defun devops--worktree-directory (branch &key (dir default-directory))
+  (let* ((path (directory-file-name (file-name-directory dir)))
+	 (name (file-name-nondirectory path))
+	 (wt (expand-file-name (concat name "_" branch) path)))
+    wt))
+
+;; (devops-worktree-directory "foo")
+;; creates worktree from main in a sibling directory called {repo}_foo
+
+;; (devops-create-worktree "../foo" "foo" (magit-get-current-branch))
+
+;; I can fire off the first command (e.g. create-migration or create-incident)
+;; This creates a worktree and a notebook with a consistenly named branch
+;; I / Claude can query which worktree dir we are in, and what type of thing we are doing (incident / activity)
+
+;; get timestamp
+;; create branch and worktree
+;; create incident dir
+
+(cl-defun devops--create-worktree
+    (&key
+     (dir default-directory)
+     (type "migration")
+     (stamp (devops--new-timestamp)))
+  "Creates a worktree and directory structure for an incident"
+  (let* ((branch (concat type "-" stamp))
+	 (target (devops--worktree-directory branch :dir dir)))
+    (magit-worktree-branch target branch "main")))
+
+(defun devops-incident (slug)
+  "Create an incident worktree and notebook"
+  (interactive "sSlug:")
+  (let ((type "incident")
+	(stamp (devops--new-timestamp)))
+    (devops--create-worktree :type type :stamp stamp)
+    (devops--create-notebook-dir slug :type type :stamp stamp)))
+
+(provide 'devops)
