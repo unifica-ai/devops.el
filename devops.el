@@ -63,6 +63,8 @@ SECRETS is a list of (secret-name auth-user) rows."
 (defun devops-org-tool-blocks (&optional regexp)
   "Return a summary of org-babel library of babel entries.
 Filter by REGEXP if provided."
+  (org-babel-lob-ingest
+   (expand-file-name "tools.org" (project-root (project-current))))
   (mapcar (lambda (entry)
             (let* ((name (car entry))
                    (info (cdr entry))
