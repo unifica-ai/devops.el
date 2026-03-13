@@ -201,8 +201,10 @@ In a src block: copies body to clipboard and exports :var env vars."
   (devops--create-notebook-dir slug :type "incidents"))
 
 (cl-defun devops--worktree-directory (branch &key (dir default-directory))
+  "Returns a sibling directory with _branch appended."
   (let* ((path (directory-file-name (file-name-directory dir)))
 	 (name (file-name-nondirectory path))
+	 (path (file-name-parent-directory path))
 	 (wt (expand-file-name (concat name "_" branch) path)))
     wt))
 
