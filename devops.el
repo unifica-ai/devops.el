@@ -182,9 +182,9 @@ In a src block: copies body to clipboard and exports :var env vars."
   "Creates a new timestamp by formatting the current time."
   (format-time-string "%Y%m%dT%H%M%S"))
 
-(cl-defun devops--create-notebook-dir (slug &key (type "migration") (timestamp (devops--new-timestamp)))
+(cl-defun devops--create-notebook-dir (slug &key (type "migration") (stamp (devops--new-timestamp)))
   "Create a notebook directory in the subdirectory indice"
-  (let* ((dir-name (format "%s--%s" timestamp slug))
+  (let* ((dir-name (format "%s--%s" stamp slug))
 	 (root (project-root (project-current)))
 	 (dir (expand-file-name (pluralize-string type) root))
 	 (notebook-dir (expand-file-name dir-name dir)))
@@ -238,5 +238,30 @@ In a src block: copies body to clipboard and exports :var env vars."
 	(stamp (devops--new-timestamp)))
     (devops--create-worktree :type type :stamp stamp)
     (devops--create-notebook-dir slug :type type :stamp stamp)))
+
+(defun devops-migration (slug)
+  "Create an incident worktree and notebook"
+  (interactive "sSlug:")
+  (let ((type "migration")
+	(stamp (devops--new-timestamp)))
+    (devops--create-worktree :type type :stamp stamp)
+    (devops--create-notebook-dir slug :type type :stamp stamp)))
+
+(defun devops-current-migration-dir (&optional absolute)
+  "When in a migration branch like migration-20260313T111705,
+find a file in the /migrations directory whose name starts with
+that timestamp, and return the path."
+  (let* ((branch (magit-get-current-branch))
+         (timestamp (when (string-match "migration-\\([0-9T]+\\)" branch)
+                      (match-string 1 branch)))
+         (migrations-dir (expand-file-name "migrations" (magit-toplevel)))
+         (match (when timestamp
+                  (seq-find (lambda (d)
+                              (string-prefix-p timestamp d))
+                            (directory-files migrations-dir nil "^[^.]")))))
+    (when match
+      (if absolute
+          (expand-file-name match migrations-dir)
+        (concat "migrations/" match)))))
 
 (provide 'devops)
