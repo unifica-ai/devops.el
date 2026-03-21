@@ -29,7 +29,7 @@
     (write-region body nil filepath)
     (message "Wrote %s" filepath)))
 
-(defun devops-resolve-auth-table (rows)
+(defun devops--resolve-secrets-table (rows)
   "Resolve auth-source passwords for ROWS against AUTH-HOST.
 Each row is (KEY AUTH-USER). Returns ((KEY PASSWORD) ...).
 Binds `default-directory' locally so auth-source (1password)
@@ -44,7 +44,7 @@ always runs `op' on the local server, not over TRAMP."
 (defun devops-create-podman-secrets (secrets)
   "Create Podman secrets.
 SECRETS is a list of (secret-name auth-user) rows."
-  (dolist (pair (devops-resolve-auth-table secrets))
+  (dolist (pair (devops--resolve-secrets-table secrets))
     (let* ((secret-name (car pair))
            (password (nth 1 pair))
            (cmd (format "printf '%%s' %s | podman secret create --replace %s -"
@@ -60,11 +60,16 @@ SECRETS is a list of (secret-name auth-user) rows."
     (org-babel-goto-named-src-block block-name)
     (org-babel-execute-src-block)))
 
+;;;###autoload
+(defun devops-ingest-tool-blocks ()
+  "Ingest tools.org"
+  (interactive)
+  (org-babel-lob-ingest
+   (expand-file-name "tools.org" (project-root (project-current)))))
+
 (defun devops-org-tool-blocks (&optional regexp)
   "Return a summary of org-babel library of babel entries.
 Filter by REGEXP if provided."
-  (org-babel-lob-ingest
-   (expand-file-name "tools.org" (project-root (project-current))))
   (mapcar (lambda (entry)
             (let* ((name (car entry))
                    (info (cdr entry))
