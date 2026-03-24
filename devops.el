@@ -176,6 +176,7 @@ BODY is the source block content to copy to clipboard."
       (let ((body (org-trim (nth 1 info))))
         (unless (string-empty-p body) body)))))
 
+;;;###autoload
 (defun devops-open-ghostty-dwim ()
   "Open Ghostty at contextual directory.
 In a src block: copies body to clipboard and exports :var env vars."
@@ -238,6 +239,7 @@ In a src block: copies body to clipboard and exports :var env vars."
 	 (target (devops--worktree-directory branch :dir dir)))
     (magit-worktree-branch target branch "main")))
 
+;;;###autoload
 (defun devops-incident (slug)
   "Create an incident worktree and notebook"
   (interactive "sSlug:")
@@ -246,6 +248,7 @@ In a src block: copies body to clipboard and exports :var env vars."
     (devops--create-worktree :type type :stamp stamp)
     (devops--create-notebook-dir slug :type type :stamp stamp)))
 
+;;;###autoload
 (defun devops-migration (slug)
   "Create an incident worktree and notebook"
   (interactive "sSlug:")
